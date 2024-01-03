@@ -163,6 +163,7 @@ class SteadyStateResult(Result):
         """
         ppp = int(round(1 / self.center_frequency / self.effective_dt))
         n_cycles = int(self.wavefield.shape[-1] / ppp)
+        # print(self.wavefield.shape)
         data = self.wavefield[..., -n_cycles * ppp :]
 
         if by_slice is None:
@@ -171,6 +172,7 @@ class SteadyStateResult(Result):
         return _extract_steady_state_amplitude(
             data, self.center_frequency, self.effective_dt, by_slice
         )
+        # return data
 
     def get_steady_state(self) -> npt.NDArray[np.float_]:
         """Return the steady-state array and while computing it if necessary.
@@ -576,6 +578,7 @@ def _extract_steady_state_amplitude(
         The steady-state wave amplitudes over the spatial dimensions (in pascals).
     """
     freqs = np.fft.fftfreq(data.shape[-1], d=dt)
+    # import pdb; pdb.set_trace()
     freq_idx = np.argwhere(np.abs(freqs - freq_hz) < 1e-5).item()
     scaling = data.shape[-1] / 2
 

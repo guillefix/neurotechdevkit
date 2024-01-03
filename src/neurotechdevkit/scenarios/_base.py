@@ -363,6 +363,7 @@ class Scenario(abc.ABC):
         time_to_steady_state: float | None = None,
         recording_time_undersampling: int = 4,
         n_jobs: int | None = None,
+        operator_type: string = "acoustic",
     ) -> results.SteadyStateResult:
         """Execute a steady-state simulation.
 
@@ -391,6 +392,7 @@ class Scenario(abc.ABC):
                 consecutive time points will be recorded and all others will be dropped.
             n_jobs: the number of threads to be used for the computation. Use None to
                 leverage Devito automatic tuning.
+            operator_type: the type of devito operator. "acoustic" or "elastic". Default is "acoustic".
 
         Returns:
             An object containing the result of the steady-state simulation.
@@ -417,7 +419,7 @@ class Scenario(abc.ABC):
         )
 
         sub_problem = self._setup_sub_problem("steady-state")
-        pde = self._create_pde()
+        pde = self._create_pde(operator_type=operator_type)
         traces = self._execute_pde(
             pde=pde,
             sub_problem=sub_problem,
@@ -428,11 +430,15 @@ class Scenario(abc.ABC):
             wavefield_slice=self._wavefield_slice(),
             n_jobs=n_jobs,
         )
+        # print(pde.wavefield.shape)
+        print(pde.wavefield)
         assert isinstance(pde.wavefield, (StructuredData, SimpleNamespace))
         assert sub_problem.shot is not None
 
         # put the time axis last and remove the empty last frame
-        wavefield = np.moveaxis(pde.wavefield.data[:-1], 0, -1)
+        wavefield_data = pde.wavefield.data[self._wavefield_slice()]
+        # import pdb; pdb.set_trace()
+        wavefield = np.moveaxis(wavefield_data[:-1], 0, -1)
 
         return results.create_steady_state_result(
             scenario=self,  # type: ignore
@@ -452,6 +458,7 @@ class Scenario(abc.ABC):
         n_jobs: int | None = None,
         slice_axis: int | None = None,
         slice_position: float | None = None,
+        operator_type: string = "acoustic",
     ) -> Union[results.PulsedResult2D, results.PulsedResult3D]:
         """Execute a pulsed simulation.
 
@@ -480,6 +487,7 @@ class Scenario(abc.ABC):
             slice_position: the position (in meters) along the slice axis at
                 which the slice of the 3D field should be made. Only valid if
                 `slice_axis` is not None.
+            operator_type: the type of devito operator. "acoustic" or "elastic". Default is "acoustic".
 
         Returns:
             An object containing the result of the pulsed simulation.
@@ -511,7 +519,7 @@ class Scenario(abc.ABC):
         )
 
         sub_problem = self._setup_sub_problem("pulsed")
-        pde = self._create_pde()
+        pde = self._create_pde(operator_type=operator_type)
         traces = self._execute_pde(
             pde=pde,
             sub_problem=sub_problem,
@@ -524,7 +532,8 @@ class Scenario(abc.ABC):
         assert sub_problem.shot is not None
 
         # put the time axis last and remove the empty last frame
-        wavefield = np.moveaxis(pde.wavefield.data[:-1], 0, -1)
+        wavefield_data = pde.wavefield.data[self._wavefield_slice(slice_axis, slice_position)]
+        wavefield = np.moveaxis(wavefield_data[:-1], 0, -1)
 
         return results.create_pulsed_result(
             scenario=self,  # type: ignore
@@ -590,7 +599,8 @@ class Scenario(abc.ABC):
             dx=self.dx,
         )
 
-    def _create_pde(self) -> stride.IsoAcousticDevito:
+    def _create_pde(self, operator_type = "acoustic") -> stride.Operator:
+    # def _create_pde(self) -> stride.IsoAcousticDevito:
         """Instantiate the stride `Operator` representing the PDE for the scenario.
 
         All existing scenarios use the `IsoAcousticDevito` operator.
@@ -599,11 +609,18 @@ class Scenario(abc.ABC):
             The PDE `Operator` ready for simulation.
         """
         problem = self.problem
-        return stride.IsoAcousticDevito(
-            space=problem.space,
-            time=problem.time,
-            devito_config={"autotuning": "off"},
-        )
+        if operator_type == "acoustic":
+            return stride.IsoAcousticDevito(
+                space=problem.space,
+                time=problem.time,
+                devito_config={"autotuning": "off"},
+            )
+        elif operator_type == "elastic":
+            return stride.IsoElasticDevito(
+                space=problem.space,
+                time=problem.time,
+                devito_config={"autotuning": "off"},
+            )
 
     def _wavefield_slice(
         self, slice_axis: int | None = None, slice_position: float | None = None
@@ -637,7 +654,8 @@ class Scenario(abc.ABC):
                 *[
                     # we want to ignore extra plus an additional 10
                     # gridpoints that stride adds to each side
-                    slice(extra + 10, extra + 10 + shape)
+                    # slice(extra + 10, extra + 10 + shape)
+                    slice(extra, extra + shape)
                     for shape, extra in zip(space.shape, space.extra)
                 ],
             ]
@@ -775,6 +793,7 @@ class Scenario(abc.ABC):
 
         devito_args = {}
         if n_jobs is not None:
+            # devito_args = dict(nthreads=n_jobs, time_M=20000)
             devito_args = dict(nthreads=n_jobs)
 
         assert sub_problem.shot is not None
@@ -783,8 +802,10 @@ class Scenario(abc.ABC):
             pde(
                 wavelets=sub_problem.shot.wavelets,
                 vp=problem.medium.fields["vp"],
+                vs=problem.medium.fields["vp"]*0.001,
                 rho=problem.medium.fields["rho"],
                 alpha=problem.medium.fields["alpha"],
+                kernel='OT2',
                 problem=sub_problem,
                 boundary_type="complex_frequency_shift_PML_2",
                 diff_source=True,
@@ -792,7 +813,6 @@ class Scenario(abc.ABC):
                 platform=os.environ.get("PLATFORM"),
                 save_bounds=save_bounds,
                 save_undersampling=save_undersampling,
-                wavefield_slice=wavefield_slice,
                 devito_args=devito_args,
             )
         )
@@ -817,6 +837,7 @@ class Scenario2D(Scenario):
         simulation_time: float | None = None,
         recording_time_undersampling: int = 4,
         n_jobs: int | None = None,
+        operator_type: string = "acoustic",
     ) -> results.PulsedResult2D:
         """Execute a pulsed simulation in 2D.
 
@@ -840,6 +861,7 @@ class Scenario2D(Scenario):
                 consecutive time points will be recorded and all others will be dropped.
             n_jobs: the number of threads to be used for the computation. Use None to
                 leverage Devito automatic tuning.
+            operator_type: the type of devito operator. "acoustic" or "elastic". Default is "acoustic".
 
         Returns:
             An object containing the result of the 2D pulsed simulation.
@@ -851,6 +873,7 @@ class Scenario2D(Scenario):
             n_jobs=n_jobs,
             slice_axis=None,
             slice_position=None,
+            operator_type=operator_type,
         )
         assert isinstance(result, results.PulsedResult2D)
         return result
@@ -1001,6 +1024,7 @@ class Scenario3D(Scenario):
         n_jobs: int | None = None,
         slice_axis: int | None = None,
         slice_position: float | None = None,
+        operator_type: string = "acoustic",
     ) -> results.PulsedResult3D:
         """Execute a pulsed simulation in 3D.
 
@@ -1030,6 +1054,7 @@ class Scenario3D(Scenario):
             slice_position: the position (in meters) along the slice axis at
                 which the slice of the 3D field should be made. Only valid if
                 `slice_axis` is not None.
+            operator_type: the type of devito operator. "acoustic" or "elastic". Default is "acoustic".
 
         Returns:
             An object containing the result of the 3D pulsed simulation.
@@ -1041,6 +1066,7 @@ class Scenario3D(Scenario):
             n_jobs=n_jobs,
             slice_axis=slice_axis,
             slice_position=slice_position,
+            operator_type=operator_type,
         )
         assert isinstance(result, results.PulsedResult3D)
         return result
